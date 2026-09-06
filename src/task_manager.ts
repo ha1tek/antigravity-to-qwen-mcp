@@ -535,11 +535,9 @@ ${params.customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИ
   }
 
   /**
-   * Check and synchronize task status, actively probing Qwen Desktop CDP
-   * if the task is marked RUNNING and generation may have finished while
-   * the MCP server process was inactive.
+   * Get current task status (async, reloads from disk and actively probes CDP if RUNNING)
    */
-  public async checkTaskStatus(taskId: string): Promise<QwenSubagentTask | undefined> {
+  public async getTask(taskId: string): Promise<QwenSubagentTask | undefined> {
     this.loadTasksFromDisk();
     const task = this.tasks.get(taskId);
     if (!task) return undefined;
@@ -576,11 +574,18 @@ ${params.customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИ
   }
 
   /**
-   * Get current task status (reloads from disk)
+   * Synchronous getTask fallback (reloads from disk without probing CDP)
    */
-  public getTask(taskId: string): QwenSubagentTask | undefined {
+  public getTaskSync(taskId: string): QwenSubagentTask | undefined {
     this.loadTasksFromDisk();
     return this.tasks.get(taskId);
+  }
+
+  /**
+   * Check and synchronize task status
+   */
+  public async checkTaskStatus(taskId: string): Promise<QwenSubagentTask | undefined> {
+    return this.getTask(taskId);
   }
 
   /**

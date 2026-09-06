@@ -144,7 +144,7 @@ server.tool(
     task_id: z.string().describe('Идентификатор задачи, полученный из mcp_qwen_submit_task')
   },
   async (args) => {
-    const task = await taskManager.checkTaskStatus(args.task_id);
+    const task = await taskManager.getTask(args.task_id);
     if (!task) {
       return {
         isError: true,
@@ -315,7 +315,7 @@ server.tool(
       let filesToSave = [];
 
       if (args.task_id) {
-        const task = taskManager.getTask(args.task_id);
+        const task = await taskManager.getTask(args.task_id);
         if (!task) {
           throw new Error(`Задача ${args.task_id} не найдена.`);
         }

@@ -560,7 +560,8 @@ export class QwenCDPAdapter {
     const insertRes = await this.evaluate<{ success: boolean; error?: string }>(`
       (function() {
         const textToType = ${JSON.stringify(textToType)};
-        const textarea = document.querySelector('textarea') || 
+        const textarea = document.querySelector('.message-input-textarea, textarea.message-input-textarea') ||
+                         document.querySelector('textarea:not(.ime-text-area)') ||
                          document.querySelector('[contenteditable="true"]') ||
                          document.querySelector('input[type="text"]');
         
@@ -608,7 +609,7 @@ export class QwenCDPAdapter {
                         document.querySelector('.send-button') ||
                         document.querySelector('button[type="submit"]');
 
-        if (sendBtn && !sendBtn.disabled) {
+        if (sendBtn && !sendBtn.disabled && !sendBtn.classList.contains('disabled')) {
           sendBtn.click();
           return { clicked: true };
         }
@@ -623,7 +624,8 @@ export class QwenCDPAdapter {
     // Step 3: Fallback - focus textarea and dispatch Enter key
     await this.evaluate(`
       (function() {
-        const textarea = document.querySelector('textarea');
+        const textarea = document.querySelector('.message-input-textarea, textarea.message-input-textarea') ||
+                         document.querySelector('textarea:not(.ime-text-area)');
         if (textarea) textarea.focus();
       })()
     `);

@@ -44,7 +44,7 @@ console.log('   Task successfully stored to disk.');
 // 2. Simulate process exit and restart with new TaskManager instance
 console.log('2. Simulating MCP process restart (new TaskManager instance)...');
 const tm2 = new TaskManager({ mode: 'cdp', cdpPort: 9222, timeoutSeconds: 300 });
-const restoredTask = tm2.getTask(testTaskId);
+const restoredTask = tm2.getTaskSync(testTaskId);
 assert(restoredTask, 'Restored task must exist in new TaskManager instance');
 assert.strictEqual(restoredTask.id, testTaskId);
 assert.strictEqual(restoredTask.status, 'COMPLETED');
