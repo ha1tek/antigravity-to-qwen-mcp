@@ -700,23 +700,46 @@ export class QwenCDPAdapter {
   /**
    * Smoothly scrolls Qwen chat container to the bottom on demand
    */
-  public async scrollToBottom(): Promise<void> {
+  public async scrollToBottom(smooth: boolean = true): Promise<void> {
     try {
       await this.evaluate(`
         (function() {
           const container = document.querySelector('.chat-messages') ||
                             document.querySelector('.chat-message-list') ||
                             document.querySelector('[class*="chat-messages"]');
-          if (container) {
-            container.scrollTo({
-              top: container.scrollHeight,
-              behavior: 'smooth'
-            });
+          if (!container) return;
+
+          const target = container.scrollHeight - container.clientHeight;
+          const start = container.scrollTop;
+          const diff = target - start;
+
+          if (diff <= 5) return;
+
+          ${smooth ? `
+          const duration = 280;
+          const startTime = performance.now();
+          function animate(now) {
+            const progress = Math.min((now - startTime) / duration, 1);
+            const ease = 1 - Math.pow(1 - progress, 3);
+            const currentTarget = container.scrollHeight - container.clientHeight;
+            const newTop = start + (currentTarget - start) * ease;
+            if (newTop > container.scrollTop) {
+              container.scrollTop = newTop;
+            }
+            if (progress < 1) {
+              requestAnimationFrame(animate);
+            } else {
+              container.scrollTop = container.scrollHeight - container.clientHeight;
+              const scrollBtn = document.querySelector('.scroll-down-button, button[aria-label*="Прокрутить вниз" i]');
+              if (scrollBtn) scrollBtn.click();
+            }
           }
+          requestAnimationFrame(animate);
+          ` : `
+          container.scrollTop = container.scrollHeight;
           const scrollBtn = document.querySelector('.scroll-down-button, button[aria-label*="Прокрутить вниз" i]');
-          if (scrollBtn) {
-            scrollBtn.click();
-          }
+          if (scrollBtn) scrollBtn.click();
+          `}
         })()
       `);
     } catch {}
@@ -733,19 +756,20 @@ export class QwenCDPAdapter {
   }> {
     const script = `
       (function() {
-        // Auto-scroll chat container to the bottom so virtualization mounts and renders the latest message
+        // Auto-scroll chat container downwards to follow streaming content smoothly
         const chatContainer = document.querySelector('.chat-messages') ||
                               document.querySelector('.chat-message-list');
         if (chatContainer) {
-          chatContainer.scrollTop = chatContainer.scrollHeight;
+          const target = chatContainer.scrollHeight - chatContainer.clientHeight;
+          const diff = target - chatContainer.scrollTop;
+          if (diff > 10) {
+            // Smoothly advance 45% towards bottom so it naturally glides with generation
+            chatContainer.scrollTop = Math.min(chatContainer.scrollTop + Math.max(diff * 0.45, 120), target);
+          }
         }
         const scrollBtn = document.querySelector('.scroll-down-button, button[aria-label*="Прокрутить вниз" i], button[aria-label*="Scroll down" i]');
-        if (scrollBtn) {
+        if (scrollBtn && scrollBtn.offsetParent !== null) {
           scrollBtn.click();
-        }
-        const allMsgs = document.querySelectorAll('.chat-response-message, .chat-user-message');
-        if (allMsgs.length > 0) {
-          allMsgs[allMsgs.length - 1].scrollIntoView({ block: 'end', behavior: 'instant' });
         }
 
         // Check for stop button (indicates active generation)

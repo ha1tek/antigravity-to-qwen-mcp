@@ -405,6 +405,7 @@ ${params.customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИ
         if (state.text === lastText) {
           stableCount++;
           if (stableCount >= 2) {
+            await this.cdpAdapter.scrollToBottom(false);
             break;
           }
         } else {
