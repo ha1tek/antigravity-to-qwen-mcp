@@ -9,7 +9,7 @@
 
 [ 🇷🇺 [Русская версия (Russian)](README.md) | 🇬🇧 [English Version](README.en.md) ]
 
-> **Autonomous Model Context Protocol (MCP) Server for dual-model software development orchestration: Gemini in Google Antigravity (Orchestrator) + Qwen 3.8 Max (Executive Subagent) via Chrome DevTools Protocol (CDP) or API.**
+> **Autonomous Model Context Protocol (MCP) Server for dual-model software development orchestration: Gemini in Google Antigravity (Orchestrator) + Qwen 3.8 Max (Executive Subagent). Out of the box, it operates locally via the Qwen Studio desktop application (leveraging Chrome DevTools Protocol / CDP), and its open-source codebase can be readily adapted for any other browser-based AI chat or direct API.**
 >
 > **Release: `v1.0` (First Working Prototype)**
 
