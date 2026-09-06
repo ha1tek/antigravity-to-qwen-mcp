@@ -1,0 +1,10 @@
+{
+  "mode": "auto",
+  "cdpHost": "127.0.0.1",
+  "cdpPort": 9222,
+  "qwenExePath": "C:\\\\Program Files\\\\Qwen\\\\Qwen.exe",
+  "apiBaseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "apiKey": "your_api_key_here",
+  "model": "qwen-max",
+  "timeoutSeconds": 300
+}

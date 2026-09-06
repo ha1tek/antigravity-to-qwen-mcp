@@ -1,0 +1,45 @@
+{
+  "name": "qwen-mcp",
+  "version": "1.0.0",
+  "description": "Autonomous MCP Server for dual-model orchestration: Gemini (Orchestrator) + Qwen 3.8 Max (Subagent)",
+  "main": "build/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node build/index.js",
+    "test": "node tests/run_all_tests.js",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "qwen",
+    "subagent",
+    "antigravity",
+    "gemini",
+    "cdp",
+    "orchestrator",
+    "claude-desktop",
+    "cursor"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "dotenv": "^17.4.2",
+    "ws": "^8.21.3",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "@types/ws": "^8.18.1",
+    "typescript": "^7.0.2"
+  },
+  "files": [
+    "build",
+    "README.md",
+    "LICENSE",
+    "config.example.json",
+    "instructions.md"
+  ]
+}
