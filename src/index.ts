@@ -249,6 +249,7 @@ server.tool(
     task_id: z.string().describe('Идентификатор задачи'),
     assembled_structure: z.string().describe('Дерево фактически собранных файлов в проекте'),
     verification_status: z.enum(['SUCCESS', 'ERRORS_FOUND']).describe('Статус проверки: SUCCESS если синтаксис/тесты в порядке, ERRORS_FOUND при ошибках'),
+    images: z.array(z.string()).optional().describe('Пути к скриншотам (до 5 штук) для визуальной проверки верстки субагентом Qwen'),
     error_log: z.string().optional().describe('Текст ошибки компилятора, линтера или сборщика (если есть)'),
     troubled_files: z.array(
       z.object({
@@ -263,6 +264,7 @@ server.tool(
         taskId: args.task_id,
         assembledStructure: args.assembled_structure,
         verificationStatus: args.verification_status,
+        images: args.images,
         errorLog: args.error_log,
         troubledFiles: args.troubled_files
       });

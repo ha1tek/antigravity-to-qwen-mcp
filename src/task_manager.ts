@@ -495,6 +495,7 @@ ${params.customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИ
     verificationStatus: 'SUCCESS' | 'ERRORS_FOUND';
     errorLog?: string;
     troubledFiles?: { path: string; content: string }[];
+    images?: string[];
   }): Promise<QwenSubagentTask> {
     this.loadTasksFromDisk();
     const task = this.tasks.get(params.taskId);
@@ -505,9 +506,18 @@ ${params.customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИ
     let verificationMessage = `[ЭТАП ВЕРИФИКАЦИИ ПРОЕКТА ОРКЕСТРАТОРОМ (Шаг 6)]\n`;
     verificationMessage += `Оркестратор собрал проект на диске. Вот структура собранных файлов:\n${params.assembledStructure}\n\n`;
 
+    if (params.images && params.images.length > 0) {
+      task.imageFilesToAttach = params.images.slice(0, 5);
+      verificationMessage += `[СКРИНШОТЫ РЕНДЕРИНГА СТРАНИЦЫ В БРАУЗЕРЕ (${task.imageFilesToAttach.length} шт.)]:\n`;
+      for (const img of task.imageFilesToAttach) {
+        verificationMessage += ` - ${img}\n`;
+      }
+      verificationMessage += `\n`;
+    }
+
     if (params.verificationStatus === 'SUCCESS') {
       verificationMessage += `СТАТУС: Все файлы собраны без синтаксических ошибок.\n`;
-      verificationMessage += `Вопрос субагенту Qwen: Всё ли реализовано корректно и полностью в соответствии с оригинальной задачей? Ответь "ПРОЕКТ_СОБРАН_ВЕРНО", если всё правильно, или укажи, что требуется исправить.`;
+      verificationMessage += `Вопрос субагенту Qwen: Изучи прикрепленные скриншоты реального рендеринга страницы и структуру проекта. Всё ли реализовано корректно и полностью в соответствии с оригинальной задачей и принципами дизайна (отступы, сетка, типографика, отсутствие глитчей)?\nОтветь "ПРОЕКТ_СОБРАН_ВЕРНО", если всё правильно, или укажи, что требуется исправить (в формате точных диффов или ### FILE: ...).`;
     } else {
       verificationMessage += `СТАТУС: ОБНАРУЖЕНЫ ОШИБКИ ПРИ СБОРКЕ / ТЕСТИРОВАНИИ:\n${params.errorLog || 'Неизвестная ошибка'}\n\n`;
       if (params.troubledFiles && params.troubledFiles.length > 0) {

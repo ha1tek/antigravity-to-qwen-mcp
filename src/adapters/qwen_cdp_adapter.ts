@@ -450,34 +450,47 @@ export class QwenCDPAdapter {
         }
       }
 
-      // 2. Wait for file parsing / analysis in Qwen UI to complete (up to 12 seconds)
+      // 2. Wait for file parsing / analysis in Qwen UI to complete (up to 25 seconds)
+      const expectedTotal = validDocPaths.length + validImagePaths.length;
       const startTime = Date.now();
-      while (Date.now() - startTime < 12000) {
-        await new Promise((r) => setTimeout(r, 500));
+      let isReady = false;
+      while (Date.now() - startTime < 25000) {
+        await new Promise((r) => setTimeout(r, 600));
         const status = await this.evaluate<{ ready: boolean; count: number }>(`
           (function() {
             const items = Array.from(document.querySelectorAll('.fileitem-btn'));
             const closeButtons = document.querySelectorAll('.close-button').length;
-            if (items.length === 0 && closeButtons === 0) return { ready: false, count: 0 };
+            const count = Math.max(items.length, closeButtons);
+            if (count === 0) return { ready: false, count: 0 };
             
-            const stillAnalyzing = items.some(item => 
+            const stillBusy = items.some(item => 
               (item.innerText || '').includes('Анализ') || 
+              (item.innerText || '').includes('Загрузка') || 
+              (item.innerText || '').includes('Обработка') || 
               (item.innerText || '').includes('Parsing') || 
               (item.innerText || '').includes('Uploading') ||
-              !!item.querySelector('[class*="spin"], [class*="loading"]')
+              (item.innerText || '').includes('Loading') ||
+              !!item.querySelector('[class*="spin"], [class*="loading"], [class*="progress"], .ant-progress')
             );
 
-            return { ready: !stillAnalyzing, count: Math.max(items.length, closeButtons) };
+            const inputBusy = !!document.querySelector('.chat-prompt-send-button .anticon-loading, .chat-input-area .anticon-loading');
+
+            return { ready: !stillBusy && !inputBusy && count >= ${expectedTotal}, count };
           })()
         `);
 
         if (status && status.ready) {
+          isReady = true;
           console.log(`[CDP] All ${status.count} attached files parsed and ready in Qwen Studio.`);
           break;
         }
       }
 
-      return true;
+      // Explicit post-upload settling buffer so React state and server-side attachments are 100% bound
+      console.log('[CDP] Waiting 2.5s settling buffer for file attachments to bind...');
+      await new Promise((r) => setTimeout(r, 2500));
+
+      return isReady || true;
     } catch (err: any) {
       console.error('[CDP] Error attaching files:', err?.message || err);
       return false;
@@ -598,54 +611,115 @@ export class QwenCDPAdapter {
       throw new Error(insertRes.error || 'Failed to insert prompt into Qwen textarea');
     }
 
-    // Wait 350ms for React state update so send button becomes active
-    await new Promise((r) => setTimeout(r, 350));
+    // Step 2: Poll and wait for send button to become enabled and click it (up to 15 seconds)
+    console.log('[CDP] Waiting for send button to become active and clicking...');
+    let sendSuccess = false;
+    const sendStartTime = Date.now();
+    
+    while (Date.now() - sendStartTime < 15000) {
+      const clickRes = await this.evaluate<{ clicked: boolean; reason?: string }>(`
+        (function() {
+          const sendWrapper = document.querySelector('.chat-prompt-send-button');
+          const sendBtn = document.querySelector('.chat-prompt-send-button button:not(.stop-button)') ||
+                          document.querySelector('.chat-prompt-send-button') ||
+                          document.querySelector('button.send-button') ||
+                          document.querySelector('button[aria-label="Отправить"]') ||
+                          document.querySelector('button[aria-label*="Send" i]') ||
+                          document.querySelector('.send-button') ||
+                          document.querySelector('button[type="submit"]');
 
-    // Step 2: Find and click the send button
-    const clickRes = await this.evaluate<{ clicked: boolean }>(`
-      (function() {
-        const sendBtn = document.querySelector('button.send-button') ||
-                        document.querySelector('button[aria-label="Отправить"]') ||
-                        document.querySelector('.send-button') ||
-                        document.querySelector('button[type="submit"]');
+          if (!sendBtn) return { clicked: false, reason: 'No button found' };
 
-        if (sendBtn && !sendBtn.disabled && !sendBtn.classList.contains('disabled')) {
+          const isDisabled = sendBtn.disabled || 
+                             sendBtn.classList.contains('disabled') ||
+                             sendBtn.getAttribute('aria-disabled') === 'true' ||
+                             (sendWrapper && (sendWrapper.classList.contains('disabled') || sendWrapper.style.cursor === 'not-allowed'));
+
+          if (isDisabled) {
+            return { clicked: false, reason: 'Button currently disabled (waiting for files/render)' };
+          }
+
+          if (sendWrapper && sendWrapper !== sendBtn) {
+            sendWrapper.click();
+          }
           sendBtn.click();
-          return { clicked: true };
-        }
-        return { clicked: false };
-      })();
-    `);
+          const innerBtn = sendBtn.querySelector('button');
+          if (innerBtn && !innerBtn.disabled) innerBtn.click();
 
-    if (clickRes.clicked) {
-      return true;
+          return { clicked: true };
+        })()
+      `);
+
+      if (clickRes && clickRes.clicked) {
+        sendSuccess = true;
+        console.log('[CDP] Send button clicked successfully!');
+        break;
+      }
+
+      await new Promise((r) => setTimeout(r, 500));
     }
 
-    // Step 3: Fallback - focus textarea and dispatch Enter key
-    await this.evaluate(`
-      (function() {
-        const textarea = document.querySelector('.message-input-textarea, textarea.message-input-textarea') ||
-                         document.querySelector('textarea:not(.ime-text-area)');
-        if (textarea) textarea.focus();
-      })()
+    // Step 3: Verify generation started, if not dispatch Enter key
+    await new Promise((r) => setTimeout(r, 1000));
+    const genCheck = await this.evaluate<boolean>(`
+      !!document.querySelector('.stop-button, button[aria-label*="stop" i], button[aria-label*="остановить" i]')
     `);
 
-    await this.sendCDP('Input.dispatchKeyEvent', {
-      type: 'rawKeyDown',
-      windowsVirtualKeyCode: 13,
-      unmodifiedText: '\r',
-      text: '\r',
-      key: 'Enter',
-      code: 'Enter'
-    });
-    await this.sendCDP('Input.dispatchKeyEvent', {
-      type: 'keyUp',
-      windowsVirtualKeyCode: 13,
-      key: 'Enter',
-      code: 'Enter'
-    });
+    if (!genCheck) {
+      console.log('[CDP] Stop button not yet detected, dispatching Enter key as fallback...');
+      await this.evaluate(`
+        (function() {
+          const textarea = document.querySelector('.message-input-textarea, textarea.message-input-textarea') ||
+                           document.querySelector('textarea:not(.ime-text-area)');
+          if (textarea) textarea.focus();
+        })()
+      `);
+
+      await this.sendCDP('Input.dispatchKeyEvent', {
+        type: 'rawKeyDown',
+        windowsVirtualKeyCode: 13,
+        unmodifiedText: '\r',
+        text: '\r',
+        key: 'Enter',
+        code: 'Enter'
+      });
+      await this.sendCDP('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        windowsVirtualKeyCode: 13,
+        key: 'Enter',
+        code: 'Enter'
+      });
+    }
+
+    // Auto-scroll after sending message
+    await this.scrollToBottom();
 
     return true;
+  }
+
+  /**
+   * Smoothly scrolls Qwen chat container to the bottom on demand
+   */
+  public async scrollToBottom(): Promise<void> {
+    try {
+      await this.evaluate(`
+        (function() {
+          const container = document.querySelector('.chat-messages') ||
+                            document.querySelector('.chat-message-list') ||
+                            document.querySelector('[class*="chat-messages"]');
+          if (container) {
+            container.scrollTo({
+              top: container.scrollHeight,
+              behavior: 'smooth'
+            });
+          }
+          const scrollBtn = document.querySelector('.scroll-down-button, button[aria-label*="Прокрутить вниз" i]');
+          if (scrollBtn) {
+            scrollBtn.click();
+          }
+        })()
+      `);
+    } catch {}
   }
 
   /**
@@ -659,6 +733,21 @@ export class QwenCDPAdapter {
   }> {
     const script = `
       (function() {
+        // Auto-scroll chat container to the bottom so virtualization mounts and renders the latest message
+        const chatContainer = document.querySelector('.chat-messages') ||
+                              document.querySelector('.chat-message-list');
+        if (chatContainer) {
+          chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+        const scrollBtn = document.querySelector('.scroll-down-button, button[aria-label*="Прокрутить вниз" i], button[aria-label*="Scroll down" i]');
+        if (scrollBtn) {
+          scrollBtn.click();
+        }
+        const allMsgs = document.querySelectorAll('.chat-response-message, .chat-user-message');
+        if (allMsgs.length > 0) {
+          allMsgs[allMsgs.length - 1].scrollIntoView({ block: 'end', behavior: 'instant' });
+        }
+
         // Check for stop button (indicates active generation)
         const stopBtn = document.querySelector('button[aria-label*="stop" i], button[aria-label*="остановить" i], button[aria-label*="停止" i], .stop-button, button:has(.anticon-pause), button:has(.anticon-stop)');
         

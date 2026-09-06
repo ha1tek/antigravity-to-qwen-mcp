@@ -138,7 +138,7 @@ In environments like Google Antigravity, idle stdio MCP processes are terminated
 | `mcp_qwen_submit_task` | Delegates a development task to Qwen subagent in background. Supports `project_dir` (full project tree, up to 10 file attachments: 4 code files + 1 prompt txt + up to 5 photos/screenshots), `images` (mockups, screenshots), `target_files` (targeted edits), and `attached_files`. Returns `task_id`. |
 | `mcp_qwen_check_status` | Polls status (`RUNNING`, `COMPLETED`, `NEED_CONTINUATION`, `ERROR`), returns parsed files, structure, and `raw_response`. |
 | `mcp_qwen_continue_task` | Sends continuation instruction to Qwen to output remaining project files. |
-| `mcp_qwen_verify_task` | **Step 6 Verification:** Sends assembled structure and compiler/linter error logs to Qwen for confirmation. |
+| `mcp_qwen_verify_task` | **Step 6 Verification:** Sends assembled structure, error logs, and rendering screenshots (`images`) to Qwen for visual confirmation. |
 | `mcp_qwen_extract_and_write_files` | Verbatim file writer with path traversal protection. |
 | `mcp_qwen_build_project_context` | Pre-scans project directory, builds tree, selects up to 4 code files and up to 5 images for attachments, and formats remaining code for prompt. |
 | `mcp_qwen_get_config` | Returns active server configuration and diagnostic network probes. |
