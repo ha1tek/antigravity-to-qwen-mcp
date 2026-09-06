@@ -680,6 +680,26 @@ export class QwenCDPAdapter {
           return { isGenerating, text: '', hasError, errorText };
         }
 
+        // Try extracting pure raw markdown directly from React Fiber message.content_list
+        try {
+          let fiber = null;
+          for (const k in lastMsg) {
+            if (k.startsWith('__reactFiber')) { fiber = lastMsg[k]; break; }
+          }
+          let curr = fiber;
+          while (curr) {
+            if (curr.memoizedProps && curr.memoizedProps.message && curr.memoizedProps.message.content_list) {
+              const list = curr.memoizedProps.message.content_list;
+              for (let i = 0; i < list.length; i++) {
+                if (list[i].phase === 'answer' && typeof list[i].content === 'string' && list[i].content.length > 0) {
+                  return { isGenerating, text: list[i].content, hasError, errorText };
+                }
+              }
+            }
+            curr = curr.return;
+          }
+        } catch (e) {}
+
         const renderFlow = lastMsg.querySelector('.chat-response-message-render-flow') || lastMsg;
         const rawInnerText = renderFlow.innerText || '';
 

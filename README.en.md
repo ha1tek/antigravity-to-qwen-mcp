@@ -123,6 +123,12 @@ Following a 350ms tick (which allows React to toggle the voice microphone icon i
 ### 4. Monaco Editor Line Extraction
 Qwen Studio displays code blocks using Microsoft Monaco Editor (`pre.qwen-markdown-code`). The adapter extracts lines directly from `.view-line` DOM elements, preserving exact indentation, linebreaks, and special characters without HTML entity distortion.
 
+### 5. Task Store & Seamless Process Recovery Across Restarts
+In environments like Google Antigravity, idle stdio MCP processes are terminated between tool invocations to conserve system resources (e.g., during 60-second `schedule` timer delays).
+- All tasks, message history, status, and parsed code files are persisted to disk at `%TEMP%\qwen_mcp\tasks_store.json`.
+- When `mcp_qwen_check_status` is triggered, the newly spawned MCP server process loads and merges tasks from disk.
+- If a task was in `RUNNING` status, the server actively reconnects to the running Qwen Desktop instance via CDP (`cdpAdapter.getGenerationState()`). If generation finished while the MCP process was asleep, it captures the complete output, parses all files, sets `COMPLETED` / `NEED_CONTINUATION`, updates disk storage, and returns the finished files immediately!
+
 ---
 
 ## 🛠 Available MCP Tools

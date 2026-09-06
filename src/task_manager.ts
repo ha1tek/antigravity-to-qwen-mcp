@@ -31,13 +31,14 @@ export class TaskManager {
     this.loadTasksFromDisk();
   }
 
-  private loadTasksFromDisk(): void {
+  public loadTasksFromDisk(): void {
     try {
       if (fs.existsSync(this.storePath)) {
         const data = fs.readFileSync(this.storePath, 'utf8');
         const list = JSON.parse(data) as QwenSubagentTask[];
         for (const t of list) {
-          if (!this.tasks.has(t.id)) {
+          const existing = this.tasks.get(t.id);
+          if (!existing || (t.updatedAt && (!existing.updatedAt || t.updatedAt >= existing.updatedAt))) {
             this.tasks.set(t.id, t);
           }
         }
@@ -47,8 +48,19 @@ export class TaskManager {
     }
   }
 
-  private saveTasksToDisk(): void {
+  public saveTasksToDisk(): void {
     try {
+      if (fs.existsSync(this.storePath)) {
+        try {
+          const data = fs.readFileSync(this.storePath, 'utf8');
+          const diskList = JSON.parse(data) as QwenSubagentTask[];
+          for (const dt of diskList) {
+            if (!this.tasks.has(dt.id)) {
+              this.tasks.set(dt.id, dt);
+            }
+          }
+        } catch {}
+      }
       const list = Array.from(this.tasks.values());
       fs.writeFileSync(this.storePath, JSON.stringify(list, null, 2), 'utf8');
     } catch (e) {
@@ -379,11 +391,13 @@ ${params.customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИ
       if (state.hasError && state.errorText) {
         task.status = 'ERROR';
         task.error = state.errorText;
+        this.saveTasksToDisk();
         return;
       }
 
       if (state.text) {
         task.currentResponse = state.text;
+        this.saveTasksToDisk();
       }
 
       if (!state.isGenerating && state.text.length > 0) {
@@ -403,6 +417,7 @@ ${params.customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИ
     if (Date.now() - startTime >= timeoutMs) {
       task.status = 'ERROR';
       task.error = `Generation timed out after ${this.config.timeoutSeconds} seconds.`;
+      this.saveTasksToDisk();
       return;
     }
 
@@ -417,6 +432,7 @@ ${params.customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИ
     const fullText = await this.apiAdapter.completeChat(task.history, (_, updated) => {
       task.currentResponse = updated;
       task.updatedAt = Date.now();
+      this.saveTasksToDisk();
     });
 
     this.finalizeTaskResponse(task, fullText);
@@ -441,12 +457,14 @@ ${params.customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИ
     } else {
       task.status = 'COMPLETED';
     }
+    this.saveTasksToDisk();
   }
 
   /**
    * Continue task with instruction
    */
   public async continueTask(taskId: string, instruction: string): Promise<QwenSubagentTask> {
+    this.loadTasksFromDisk();
     const task = this.tasks.get(taskId);
     if (!task) {
       throw new Error(`Task ${taskId} not found.`);
@@ -456,11 +474,13 @@ ${params.customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИ
     task.history.push({ role: 'user', content: continuationPrompt });
     task.status = 'RUNNING';
     task.updatedAt = Date.now();
+    this.saveTasksToDisk();
 
     this.runTaskAsync(taskId).catch((err) => {
       task.status = 'ERROR';
       task.error = err?.message || String(err);
       task.updatedAt = Date.now();
+      this.saveTasksToDisk();
     });
 
     return task;
@@ -476,6 +496,7 @@ ${params.customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИ
     errorLog?: string;
     troubledFiles?: { path: string; content: string }[];
   }): Promise<QwenSubagentTask> {
+    this.loadTasksFromDisk();
     const task = this.tasks.get(params.taskId);
     if (!task) {
       throw new Error(`Task ${params.taskId} not found.`);
@@ -501,27 +522,72 @@ ${params.customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИ
     task.history.push({ role: 'user', content: verificationMessage });
     task.status = 'RUNNING';
     task.updatedAt = Date.now();
+    this.saveTasksToDisk();
 
     this.runTaskAsync(params.taskId).catch((err) => {
       task.status = 'ERROR';
       task.error = err?.message || String(err);
       task.updatedAt = Date.now();
+      this.saveTasksToDisk();
     });
 
     return task;
   }
 
   /**
-   * Get current task status
+   * Check and synchronize task status, actively probing Qwen Desktop CDP
+   * if the task is marked RUNNING and generation may have finished while
+   * the MCP server process was inactive.
+   */
+  public async checkTaskStatus(taskId: string): Promise<QwenSubagentTask | undefined> {
+    this.loadTasksFromDisk();
+    const task = this.tasks.get(taskId);
+    if (!task) return undefined;
+
+    // If task is RUNNING in CDP mode, actively query CDP generation state
+    if (task.status === 'RUNNING' && this.config.mode !== 'api') {
+      try {
+        const cdpAvail = await this.cdpAdapter.isAvailable();
+        if (cdpAvail) {
+          const state = await this.cdpAdapter.getGenerationState();
+          task.updatedAt = Date.now();
+
+          if (state.hasError && state.errorText) {
+            task.status = 'ERROR';
+            task.error = state.errorText;
+            this.saveTasksToDisk();
+          } else if (state.text) {
+            task.currentResponse = state.text;
+            if (!state.isGenerating && state.text.length > 0) {
+              // Generation completed in Qwen Desktop while server was offline or idle
+              this.finalizeTaskResponse(task, state.text);
+            } else {
+              // Still generating, update latest progress to disk
+              this.saveTasksToDisk();
+            }
+          }
+        }
+      } catch (err: any) {
+        console.error(`[TaskManager] Error probing CDP state for task ${taskId}:`, err?.message || err);
+      }
+    }
+
+    return task;
+  }
+
+  /**
+   * Get current task status (reloads from disk)
    */
   public getTask(taskId: string): QwenSubagentTask | undefined {
+    this.loadTasksFromDisk();
     return this.tasks.get(taskId);
   }
 
   /**
-   * List all tasks
+   * List all tasks (reloads from disk)
    */
   public listTasks(): QwenSubagentTask[] {
+    this.loadTasksFromDisk();
     return Array.from(this.tasks.values());
   }
 }
