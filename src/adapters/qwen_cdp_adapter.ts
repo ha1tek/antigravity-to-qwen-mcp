@@ -4,6 +4,32 @@ import * as path from 'path';
 import { spawn, execSync, exec } from 'child_process';
 import WebSocket from 'ws';
 import { ServerConfig } from '../types';
+import { isImageFile } from '../project_context';
+
+function getMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case '.png': return 'image/png';
+    case '.jpg':
+    case '.jpeg': return 'image/jpeg';
+    case '.webp': return 'image/webp';
+    case '.gif': return 'image/gif';
+    case '.svg': return 'image/svg+xml';
+    case '.bmp': return 'image/bmp';
+    case '.ico': return 'image/x-icon';
+    case '.avif': return 'image/avif';
+    case '.txt': return 'text/plain';
+    case '.json': return 'application/json';
+    case '.ts':
+    case '.tsx': return 'text/typescript';
+    case '.js':
+    case '.jsx': return 'text/javascript';
+    case '.css': return 'text/css';
+    case '.html': return 'text/html';
+    case '.md': return 'text/markdown';
+    default: return 'text/plain';
+  }
+}
 
 export interface CDPTarget {
   id: string;
@@ -259,15 +285,281 @@ export class QwenCDPAdapter {
   }
 
   /**
-   * Type message and submit it to Qwen chat
+   * Attach files to Qwen Studio using React Fiber uploadHandler with CDP fallback
+   * Supports up to 5 documents (type: ["document"]) and up to 5 images (type: ["vision"]) (total up to 10 files)
    */
-  public async submitMessage(message: string): Promise<boolean> {
+  public async attachFiles(
+    files: string[] | { docFiles?: string[]; imageFiles?: string[] }
+  ): Promise<boolean> {
+    if (!files) return true;
+
+    let docPaths: string[] = [];
+    let imagePaths: string[] = [];
+
+    if (Array.isArray(files)) {
+      for (const f of files) {
+        if (isImageFile(f)) {
+          imagePaths.push(f);
+        } else {
+          docPaths.push(f);
+        }
+      }
+    } else {
+      if (files.docFiles) {
+        for (const f of files.docFiles) {
+          if (isImageFile(f)) imagePaths.push(f);
+          else docPaths.push(f);
+        }
+      }
+      if (files.imageFiles) {
+        for (const f of files.imageFiles) {
+          if (isImageFile(f)) imagePaths.push(f);
+          else docPaths.push(f);
+        }
+      }
+    }
+
+    const validDocPaths = docPaths
+      .map((p) => path.resolve(p))
+      .filter((p) => fs.existsSync(p))
+      .slice(0, 5); // Max 5 documents
+
+    const validImagePaths = imagePaths
+      .map((p) => path.resolve(p))
+      .filter((p) => fs.existsSync(p))
+      .slice(0, 5); // Max 5 images
+
+    if (validDocPaths.length === 0 && validImagePaths.length === 0) return true;
+
     await this.connect();
+
+    const docFilesData = validDocPaths.map((filePath) => {
+      const name = path.basename(filePath);
+      const mimeType = getMimeType(filePath);
+      try {
+        const buf = fs.readFileSync(filePath);
+        const isBinary = buf.slice(0, 1000).some((b) => b === 0);
+        if (isBinary) {
+          return { name, base64: buf.toString('base64'), mimeType, isBinary: true };
+        } else {
+          return { name, content: buf.toString('utf8'), mimeType, isBinary: false };
+        }
+      } catch (e) {
+        return { name, content: '', mimeType, isBinary: false };
+      }
+    });
+
+    const imageFilesData = validImagePaths.map((filePath) => {
+      const name = path.basename(filePath);
+      const mimeType = getMimeType(filePath);
+      try {
+        const buf = fs.readFileSync(filePath);
+        return { name, base64: buf.toString('base64'), mimeType, isBinary: true };
+      } catch (e) {
+        return { name, base64: '', mimeType, isBinary: true };
+      }
+    });
+
+    try {
+      // 1. Try direct React Fiber uploadHandler
+      const attachRes = await this.evaluate<{ success: boolean; error?: string; count?: number }>(`
+        (function() {
+          const docFilesData = ${JSON.stringify(docFilesData)};
+          const imageFilesData = ${JSON.stringify(imageFilesData)};
+          const inp = document.querySelector('#filesUpload');
+          if (!inp) return { success: false, error: 'No #filesUpload element' };
+
+          const fiberKey = Object.keys(inp).find(k => k.startsWith('__reactFiber'));
+          if (!fiberKey) return { success: false, error: 'No React fiber on input' };
+
+          let cur = inp[fiberKey];
+          let dE_fiber = null;
+          while (cur) {
+            if (cur.memoizedProps && cur.memoizedProps.uploadHandler) {
+              dE_fiber = cur;
+              break;
+            }
+            cur = cur.return;
+          }
+
+          if (!dE_fiber || !dE_fiber.memoizedProps.uploadHandler) {
+            return { success: false, error: 'uploadHandler not found in React fiber' };
+          }
+
+          const handler = dE_fiber.memoizedProps.uploadHandler;
+
+          function b64ToFile(base64, name, mimeType) {
+            const binStr = atob(base64);
+            const bytes = new Uint8Array(binStr.length);
+            for (let i = 0; i < binStr.length; i++) {
+              bytes[i] = binStr.charCodeAt(i);
+            }
+            return new File([bytes], name, { type: mimeType || 'application/octet-stream' });
+          }
+
+          const docWebFiles = docFilesData.map(f => {
+            if (f.isBinary && f.base64) {
+              return b64ToFile(f.base64, f.name, f.mimeType);
+            } else {
+              return new File([f.content || ''], f.name, { type: f.mimeType || 'text/plain' });
+            }
+          });
+
+          const imageWebFiles = imageFilesData.map(f => {
+            return b64ToFile(f.base64, f.name, f.mimeType);
+          });
+
+          try {
+            if (docWebFiles.length > 0) {
+              handler({ files: docWebFiles, type: ["document"] });
+            }
+            if (imageWebFiles.length > 0) {
+              handler({ files: imageWebFiles, type: ["vision"] });
+            }
+            return { success: true, count: docWebFiles.length + imageWebFiles.length };
+          } catch (err) {
+            return { success: false, error: (err && err.message) || String(err) };
+          }
+        })()
+      `);
+
+      if (!attachRes || !attachRes.success) {
+        console.warn('[CDP] Direct React uploadHandler failed, attempting CDP fallback:', attachRes?.error);
+        const allFiles = [...validDocPaths, ...validImagePaths];
+        await this.sendCDP('DOM.enable', {});
+        const doc = await this.sendCDP('DOM.getDocument', {});
+        const node = await this.sendCDP('DOM.querySelector', {
+          nodeId: doc.root.nodeId,
+          selector: '#filesUpload'
+        });
+
+        if (node && node.nodeId) {
+          await this.sendCDP('DOM.setFileInputFiles', {
+            files: allFiles,
+            nodeId: node.nodeId
+          });
+          await this.evaluate(`
+            (function() {
+              const inp = document.querySelector('#filesUpload');
+              if (inp) {
+                inp.dispatchEvent(new Event('change', { bubbles: true }));
+                inp.dispatchEvent(new Event('input', { bubbles: true }));
+              }
+            })()
+          `);
+        }
+      }
+
+      // 2. Wait for file parsing / analysis in Qwen UI to complete (up to 12 seconds)
+      const startTime = Date.now();
+      while (Date.now() - startTime < 12000) {
+        await new Promise((r) => setTimeout(r, 500));
+        const status = await this.evaluate<{ ready: boolean; count: number }>(`
+          (function() {
+            const items = Array.from(document.querySelectorAll('.fileitem-btn'));
+            const closeButtons = document.querySelectorAll('.close-button').length;
+            if (items.length === 0 && closeButtons === 0) return { ready: false, count: 0 };
+            
+            const stillAnalyzing = items.some(item => 
+              (item.innerText || '').includes('Анализ') || 
+              (item.innerText || '').includes('Parsing') || 
+              (item.innerText || '').includes('Uploading') ||
+              !!item.querySelector('[class*="spin"], [class*="loading"]')
+            );
+
+            return { ready: !stillAnalyzing, count: Math.max(items.length, closeButtons) };
+          })()
+        `);
+
+        if (status && status.ready) {
+          console.log(`[CDP] All ${status.count} attached files parsed and ready in Qwen Studio.`);
+          break;
+        }
+      }
+
+      return true;
+    } catch (err: any) {
+      console.error('[CDP] Error attaching files:', err?.message || err);
+      return false;
+    }
+  }
+
+  /**
+   * Type message and submit it to Qwen chat with optional file attachments
+   * Supports up to 5 documents (4 project files + 1 prompt txt) and up to 5 images (total up to 10 files)
+   */
+  public async submitMessage(
+    message: string,
+    filesToAttach?: string[] | { docFiles?: string[]; imageFiles?: string[] }
+  ): Promise<boolean> {
+    await this.connect();
+
+    let textToType = message;
+    let docFiles: string[] = [];
+    let imageFiles: string[] = [];
+
+    if (Array.isArray(filesToAttach)) {
+      for (const f of filesToAttach) {
+        if (isImageFile(f)) imageFiles.push(f);
+        else docFiles.push(f);
+      }
+    } else if (filesToAttach) {
+      if (filesToAttach.docFiles) {
+        for (const f of filesToAttach.docFiles) {
+          if (isImageFile(f)) imageFiles.push(f);
+          else docFiles.push(f);
+        }
+      }
+      if (filesToAttach.imageFiles) {
+        for (const f of filesToAttach.imageFiles) {
+          if (isImageFile(f)) imageFiles.push(f);
+          else docFiles.push(f);
+        }
+      }
+    }
+
+    // Limit images to max 5
+    imageFiles = imageFiles.slice(0, 5);
+
+    // Qwen Studio has a strict textarea limit of 131,072 characters (2^17).
+    // If the prompt exceeds 50,000 characters or contains embedded overflow files (=== ФАЙЛ:),
+    // or if docFiles > 4, package the full text into task_prompt.txt,
+    // attach 1 prompt txt + up to 4 project files (total 5 documents) + up to 5 images.
+    const shouldPackageToTxt =
+      textToType.length > 50000 ||
+      textToType.includes('=== ФАЙЛ:') ||
+      docFiles.length > 4;
+
+    if (shouldPackageToTxt) {
+      const tempDir = path.join(process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp', 'qwen_mcp');
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+      const taskPromptFile = path.join(tempDir, 'task_prompt.txt');
+      fs.writeFileSync(taskPromptFile, message, 'utf8');
+
+      // Max 4 project code files + 1 task_prompt.txt = 5 documents
+      docFiles = docFiles.slice(0, 4);
+      docFiles.unshift(taskPromptFile);
+
+      textToType = `[РОЛЬ: СУБАГЕНТ QWEN 3.8 MAX]
+Ты являешься исполнительным субагентом для Оркестратора (Gemini в Google Antigravity).
+Полный текст задачи со всеми инструкциями, структурой проекта и кодом файлов сохранен и прикреплен во вложенном файле task_prompt.txt (также изучи остальные прикрепленные файлы проекта и изображения во вложениях).
+
+Внимательно изучи прикрепленный файл task_prompt.txt и все вложения, затем выполни задачу строго по правилам субагента: начни с дерева структуры, затем выводи каждый файл через ### FILE: путь/к/файлу.`;
+    } else {
+      docFiles = docFiles.slice(0, 5);
+    }
+
+    // Step 0: Attach files if provided (up to 5 documents + up to 5 images)
+    if (docFiles.length > 0 || imageFiles.length > 0) {
+      await this.attachFiles({ docFiles, imageFiles });
+    }
 
     // Step 1: Input text into textarea
     const insertRes = await this.evaluate<{ success: boolean; error?: string }>(`
       (function() {
-        const textToType = ${JSON.stringify(message)};
+        const textToType = ${JSON.stringify(textToType)};
         const textarea = document.querySelector('textarea') || 
                          document.querySelector('[contenteditable="true"]') ||
                          document.querySelector('input[type="text"]');

@@ -5,7 +5,10 @@ import {
   ChatMessage,
   ParsedFile
 } from './types';
+import * as fs from 'fs';
+import * as path from 'path';
 import { parseQwenOutput } from './parser';
+import { buildProjectContext, isImageFile } from './project_context';
 import { QwenCDPAdapter } from './adapters/qwen_cdp_adapter';
 import { QwenAPIAdapter } from './adapters/qwen_api_adapter';
 
@@ -14,11 +17,43 @@ export class TaskManager {
   private config: ServerConfig;
   private cdpAdapter: QwenCDPAdapter;
   private apiAdapter: QwenAPIAdapter;
+  private storePath: string;
 
   constructor(config: ServerConfig) {
     this.config = config;
     this.cdpAdapter = new QwenCDPAdapter(config);
     this.apiAdapter = new QwenAPIAdapter(config);
+    const tempDir = path.join(process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp', 'qwen_mcp');
+    if (!fs.existsSync(tempDir)) {
+      try { fs.mkdirSync(tempDir, { recursive: true }); } catch {}
+    }
+    this.storePath = path.join(tempDir, 'tasks_store.json');
+    this.loadTasksFromDisk();
+  }
+
+  private loadTasksFromDisk(): void {
+    try {
+      if (fs.existsSync(this.storePath)) {
+        const data = fs.readFileSync(this.storePath, 'utf8');
+        const list = JSON.parse(data) as QwenSubagentTask[];
+        for (const t of list) {
+          if (!this.tasks.has(t.id)) {
+            this.tasks.set(t.id, t);
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[TaskManager] Error loading tasks from disk:', e);
+    }
+  }
+
+  private saveTasksToDisk(): void {
+    try {
+      const list = Array.from(this.tasks.values());
+      fs.writeFileSync(this.storePath, JSON.stringify(list, null, 2), 'utf8');
+    } catch (e) {
+      console.error('[TaskManager] Error saving tasks to disk:', e);
+    }
   }
 
   public updateConfig(newConfig: Partial<ServerConfig>): void {
@@ -34,12 +69,16 @@ export class TaskManager {
   /**
    * Build the strict Subagent System Prompt for Qwen
    */
-  public buildSubagentPrompt(
-    userPrompt: string,
-    skillsContent?: string,
-    workspaceContext?: string,
-    customSystemPrompt?: string
-  ): { systemPrompt: string; fullUserMessage: string } {
+  public buildSubagentPrompt(params: {
+    userPrompt: string;
+    skillsContent?: string;
+    workspaceContext?: string;
+    projectStructure?: string;
+    attachedFilesList?: string[];
+    embeddedFilesPrompt?: string;
+    customSystemPrompt?: string;
+    isTargeted?: boolean;
+  }): { systemPrompt: string; fullUserMessage: string } {
     const systemPrompt = `[РОЛЬ: СУБАГЕНТ QWEN 3.8 MAX]
 Ты являешься исполнительным субагентом для Оркестратора (Gemini в Google Antigravity).
 Оркестратор передает тебе оригинальную задачу пользователя без изменений.
@@ -66,17 +105,43 @@ export class TaskManager {
 - Писать вступительные объяснения или пространные рассуждения до дерева структуры проекта.
 - Сокращать код (например, "// остальной код здесь", "TODO: implement").
 - Менять исходную бизнес-логику или требования оригинальной задачи.
-${customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИИ:\n${customSystemPrompt}` : ''}
+${params.customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИИ:\n${params.customSystemPrompt}` : ''}
 `;
 
-    let fullUserMessage = `[ОРИГИНАЛЬНЫЙ ЗАПРОС ПОЛЬЗОВАТЕЛЯ]:\n${userPrompt}\n`;
+    let fullUserMessage = `[ОРИГИНАЛЬНЫЙ ЗАПРОС ПОЛЬЗОВАТЕЛЯ]:\n${params.userPrompt}\n`;
 
-    if (skillsContent && skillsContent.trim()) {
-      fullUserMessage += `\n[ПОЛНОЕ СОДЕРЖИМОЕ СКИЛЛОВ ДЛЯ ВЫПОЛНЕНИЯ ЗАДАЧИ]:\n${skillsContent.trim()}\n`;
+    if (params.skillsContent && params.skillsContent.trim()) {
+      fullUserMessage += `\n[ПОЛНОЕ СОДЕРЖИМОЕ СКИЛЛОВ ДЛЯ ВЫПОЛНЕНИЯ ЗАДАЧИ]:\n${params.skillsContent.trim()}\n`;
     }
 
-    if (workspaceContext && workspaceContext.trim()) {
-      fullUserMessage += `\n[ТЕКУЩИЙ КОНТЕКСТ ПРОЕКТА / РАБОЧАЯ ОБЛАСТЬ]:\n${workspaceContext.trim()}\n`;
+    if (params.workspaceContext && params.workspaceContext.trim()) {
+      fullUserMessage += `\n[ТЕКУЩИЙ КОНТЕКСТ ПРОЕКТА / РАБОЧАЯ ОБЛАСТЬ]:\n${params.workspaceContext.trim()}\n`;
+    }
+
+    if (params.projectStructure && params.projectStructure.trim()) {
+      fullUserMessage += `\n[СТРУКТУРА СУЩЕСТВУЮЩЕГО ПРОЕКТА]:\n${params.projectStructure.trim()}\n`;
+    }
+
+    if (params.attachedFilesList && params.attachedFilesList.length > 0) {
+      const docFiles = params.attachedFilesList.filter((f) => !isImageFile(f));
+      const imgFiles = params.attachedFilesList.filter((f) => isImageFile(f));
+
+      fullUserMessage += `\n[ПРИКРЕПЛЕННЫЕ ВЛОЖЕНИЯ К СООБЩЕНИЮ (всего до 10 файлов: до 5 документов и до 5 изображений)]:\n`;
+      if (docFiles.length > 0) {
+        fullUserMessage += `[Документы и код проекта (${docFiles.length})]:\n` + docFiles.map((f) => `  - ${f}`).join('\n') + '\n';
+      }
+      if (imgFiles.length > 0) {
+        fullUserMessage += `[Изображения, референсы и скриншоты (${imgFiles.length})]:\n` + imgFiles.map((f) => `  - ${f}`).join('\n') + '\n';
+      }
+      fullUserMessage += `(Изучи прикрепленные файлы и изображения во вложениях перед написанием кода).\n`;
+    }
+
+    if (params.embeddedFilesPrompt && params.embeddedFilesPrompt.trim()) {
+      fullUserMessage += `\n${params.embeddedFilesPrompt.trim()}\n`;
+    }
+
+    if (params.isTargeted) {
+      fullUserMessage += `\n[РЕЖИМ: ТОЧЕЧНАЯ ПРАВКА]:\nТребуется точечная доработка/исправление. Вноси изменения строго в целевой файл (или целевые файлы) без переписывания всего остального проекта.\n`;
     }
 
     fullUserMessage += `\nВыполняй задачу строго по правилам субагента: начни с дерева структуры, затем выводи каждый файл через ### FILE: путь/к/файлу.`;
@@ -91,21 +156,130 @@ ${customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИИ:\n${
     userPrompt: string;
     skillsContent?: string;
     workspaceContext?: string;
+    projectDir?: string;
+    targetFiles?: string[];
+    images?: string[];
+    attachedFiles?: string[];
     customSystemPrompt?: string;
   }): Promise<QwenSubagentTask> {
     const taskId = `qwen_task_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const { systemPrompt, fullUserMessage } = this.buildSubagentPrompt(
-      params.userPrompt,
-      params.skillsContent,
-      params.workspaceContext,
-      params.customSystemPrompt
-    );
+
+    let docFilesToAttach: string[] = [];
+    let imageFilesToAttach: string[] = [];
+    let projectStructure = '';
+    let embeddedFilesPrompt = '';
+    let isTargeted = false;
+    let effectiveProjectDir = params.projectDir;
+
+    // Collect explicitly provided images and detect any image file paths in userPrompt
+    const explicitImages: string[] = params.images ? [...params.images] : [];
+    const promptImageMatches = params.userPrompt.match(/[a-zA-Z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\r\n]+\.(?:png|jpg|jpeg|webp|gif|svg|bmp|ico)/gi);
+    if (promptImageMatches) {
+      for (const imgPath of promptImageMatches) {
+        if (fs.existsSync(imgPath) && !explicitImages.includes(imgPath)) {
+          explicitImages.push(imgPath);
+        }
+      }
+    }
+
+    // Process any attachedFiles into docs or images
+    if (params.attachedFiles) {
+      for (const f of params.attachedFiles) {
+        if (isImageFile(f)) {
+          if (!explicitImages.includes(f)) explicitImages.push(f);
+        } else {
+          docFilesToAttach.push(f);
+        }
+      }
+    }
+
+    // Automatic fallback: if Gemini did not pass project_dir, auto-detect from context or process.cwd()
+    if (!effectiveProjectDir) {
+      const combinedText = `${params.workspaceContext || ''}\n${params.userPrompt || ''}`;
+      const pathMatches = combinedText.match(/[a-zA-Z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\r\n]+/g);
+      if (pathMatches) {
+        for (const cand of pathMatches) {
+          try {
+            const cleanCand = cand.trim().replace(/[.,;:)\]'"]+$/, '');
+            if (fs.existsSync(cleanCand) && fs.statSync(cleanCand).isDirectory()) {
+              effectiveProjectDir = cleanCand;
+              console.error(`[TaskManager] Auto-detected projectDir from context: ${effectiveProjectDir}`);
+              break;
+            }
+          } catch {}
+        }
+      }
+
+      if (!effectiveProjectDir) {
+        try {
+          const cwd = process.cwd();
+          if (fs.existsSync(cwd) && !cwd.toLowerCase().endsWith('qwen_mcp')) {
+            const entries = fs.readdirSync(cwd);
+            const hasProjectMarkers = entries.some(
+              (e: string) => e === 'package.json' || e === 'src' || e === 'requirements.txt' || e === 'go.mod'
+            );
+            if (hasProjectMarkers) {
+              effectiveProjectDir = cwd;
+              console.error(`[TaskManager] Auto-detected projectDir from cwd: ${effectiveProjectDir}`);
+            }
+          }
+        } catch {}
+      }
+    }
+
+    if (effectiveProjectDir) {
+      const ctx = buildProjectContext({
+        projectDir: effectiveProjectDir,
+        targetFiles: params.targetFiles,
+        imageFiles: explicitImages,
+        maxDocAttachments: 4, // 4 project files + 1 task_prompt.txt = 5 documents
+        maxImageAttachments: 5 // up to 5 photos/screenshots/images
+      });
+      isTargeted = ctx.isTargeted;
+      projectStructure = ctx.directoryTree;
+      docFilesToAttach = Array.from(new Set([...docFilesToAttach, ...ctx.docFilesToAttach]));
+      imageFilesToAttach = Array.from(new Set([...imageFilesToAttach, ...ctx.imageFilesToAttach]));
+      embeddedFilesPrompt = ctx.embeddedFilesPrompt;
+    } else if (params.targetFiles && params.targetFiles.length > 0) {
+      for (const t of params.targetFiles) {
+        if (isImageFile(t)) imageFilesToAttach.push(t);
+        else docFilesToAttach.push(t);
+      }
+      imageFilesToAttach.push(...explicitImages);
+      isTargeted = true;
+    } else {
+      imageFilesToAttach.push(...explicitImages);
+    }
+
+    // Enforce limits: max 4 project docs (reserves 1 slot for task_prompt.txt) and max 5 images
+    docFilesToAttach = docFilesToAttach.slice(0, 4);
+    imageFilesToAttach = imageFilesToAttach.slice(0, 5);
+    const filesToAttach = [...docFilesToAttach, ...imageFilesToAttach];
+
+    const { systemPrompt, fullUserMessage } = this.buildSubagentPrompt({
+      userPrompt: params.userPrompt,
+      skillsContent: params.skillsContent,
+      workspaceContext: params.workspaceContext,
+      projectStructure,
+      attachedFilesList: filesToAttach,
+      embeddedFilesPrompt,
+      customSystemPrompt: params.customSystemPrompt,
+      isTargeted
+    });
 
     const task: QwenSubagentTask = {
       id: taskId,
       userPrompt: params.userPrompt,
       skillsContent: params.skillsContent,
       workspaceContext: params.workspaceContext,
+      projectDir: params.projectDir,
+      targetFiles: params.targetFiles,
+      images: params.images,
+      attachedFiles: params.attachedFiles,
+      filesToAttach: filesToAttach.length > 0 ? filesToAttach : undefined,
+      docFilesToAttach: docFilesToAttach.length > 0 ? docFilesToAttach : undefined,
+      imageFilesToAttach: imageFilesToAttach.length > 0 ? imageFilesToAttach : undefined,
+      isTargeted,
       customSystemPrompt: params.customSystemPrompt,
       status: 'RUNNING',
       createdAt: Date.now(),
@@ -115,17 +289,19 @@ ${customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИИ:\n${
         { role: 'user', content: fullUserMessage }
       ],
       currentResponse: '',
-      projectStructure: '',
+      projectStructure: projectStructure || '',
       parsedFiles: []
     };
 
     this.tasks.set(taskId, task);
+    this.saveTasksToDisk();
 
     // Launch execution in background without blocking tool return
     this.runTaskAsync(taskId).catch((err) => {
       task.status = 'ERROR';
       task.error = err?.message || String(err);
       task.updatedAt = Date.now();
+      this.saveTasksToDisk();
     });
 
     return task;
@@ -177,7 +353,16 @@ ${customSystemPrompt ? `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИИ:\n${
         ? `${systemPrompt}\n\n${lastUserMessage}`
         : lastUserMessage;
 
-    await this.cdpAdapter.submitMessage(messageToSend);
+    const filesToUpload = {
+      docFiles: task.docFilesToAttach,
+      imageFiles: task.imageFilesToAttach
+    };
+    await this.cdpAdapter.submitMessage(messageToSend, filesToUpload);
+
+    // Clear filesToAttach after sending initial message so continuations don't re-upload
+    task.filesToAttach = undefined;
+    task.docFilesToAttach = undefined;
+    task.imageFilesToAttach = undefined;
 
     // Polling loop to wait for generation to complete
     const startTime = Date.now();

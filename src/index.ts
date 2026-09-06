@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { loadConfig, saveConfig } from './config';
 import { TaskManager } from './task_manager';
 import { writeFilesToDisk } from './file_writer';
+import { buildProjectContext } from './project_context';
 
 const config = loadConfig();
 const taskManager = new TaskManager(config);
@@ -14,7 +15,11 @@ export const ORCHESTRATION_INSTRUCTIONS = `
 Когда пользователь запрашивает разработку или решение задачи с использованием Qwen (mcp_qwen), агент Gemini переходит в статус 100% ОРКЕСТРАТОРА:
 1. ТЫ СТРОГО 100% ОРКЕСТРАТОР. Не пиши код самостоятельно в обход субагента Qwen.
 2. ЗАПРЕЩЕНО перефразировать, дополнять или "улучшать" оригинальный запрос пользователя при передаче в mcp_qwen_submit_task.
-3. Собирай полный контекст: оригинальный запрос пользователя без изменений (user_prompt), полный текст скиллов (skills_content) и контекст рабочего каталога (workspace_context).
+3. ПЕРЕДАЧА КОНТЕКСТА ПРОЕКТА (КАТЕГОРИЧЕСКОЕ ПРАВИЛО):
+   - ЕСЛИ В ПРОЕКТЕ ЕСТЬ ХОТЬ КАКИЕ-ТО СУЩЕСТВУЮЩИЕ ФАЙЛЫ (код, package.json, компоненты, скрипты и т.д.): Gemini ОБЯЗАН ВСЕГДА передавать project_dir: "<абсолютный путь к рабочей папке проекта>". СТРОГО ЗАПРЕЩЕНО оставлять project_dir пустым и запрещено описывать проект текстом от себя!
+     Сервер qwen_mcp автоматически упакует проект: построит дерево структуры и прикрепит до 10 файлов (до 5 документов: 4 файла проекта + 1 txt промпт со всеми недостающими файлами 5..N, и до 5 изображений/скриншотов). Субагент Qwen 3.8 Max с контекстным окном >1 000 000 токенов прочитывает весь код проекта за один запрос.
+   - Если требуется ТОЧЕЧНАЯ ПРАВКА (один конкретный файл или точечный баг): НЕ передавай весь проект целиком! Передавай target_files: ["путь/к/файлу"], чтобы прикрепить только целевой файл и сохранить максимальную концентрацию субагента.
+   - Если есть изображения, дизайн-макеты или скриншоты: передавай images: ["путь/к/фото.png"] (до 5 изображений).
 4. Запускай задачу через mcp_qwen_submit_task.
 5. Сразу после запуска ОБЯЗАТЕЛЬНО ставь таймер на 60 секунд через системный инструмент schedule:
    schedule(DurationSeconds=60, Prompt="Проверить статус субагента Qwen через mcp_qwen_check_status(task_id)").
@@ -29,7 +34,7 @@ export const ORCHESTRATION_INSTRUCTIONS = `
 const server = new McpServer(
   {
     name: 'mcp_qwen',
-    version: '1.0.0'
+    version: '1.1.0'
   },
   {
     instructions: ORCHESTRATION_INSTRUCTIONS
@@ -61,13 +66,19 @@ server.tool(
   'Делегирует задачу субагенту Qwen 3.8 Max (в Qwen Studio / API). ' +
   'ОБЯЗАТЕЛЬНОЕ ПРАВИЛО ДЛЯ GEMINI: При вызове этого инструмента ты являешься 100% ТОЛЬКО ОРКЕСТРАТОРОМ. ' +
   'СТРОГО ЗАПРЕЩЕНО искажать, "улучшать" или перефразировать запрос пользователя — передавай оригинальный текст как есть. ' +
-  'Собери весь контекст (оригинальный промпт, полный текст используемых скиллов, файлы контекста). ' +
+  'КАТЕГОРИЧЕСКОЕ ТРЕБОВАНИЕ: Если в проекте есть ХОТЬ КАКИЕ-ТО существующие файлы (код, package.json, компоненты, скрипты и т.д.), ты ОБЯЗАН передать project_dir: "<абсолютный путь к рабочей папке>". Сервер автоматически строит дерево структуры и прикрепляет до 10 файлов (до 5 документов: 4 файла проекта + 1 txt промпт со всеми недостающими файлами 5..N, и до 5 изображений/скриншотов). Запрещено описывать проект словами от себя! ' +
+  'Если требуется точечная правка одного файла — передай target_files: ["путь/к/файлу"]. ' +
+  'Для передачи дизайн-макетов, фотографий или скриншотов передай images: ["путь/к/фото.png"] (до 5 изображений). ' +
   'После вызова инструмента ОБЯЗАТЕЛЬНО установи таймер на 60 секунд через инструмент schedule, ' +
   'чтобы каждые 60 секунд опрашивать статус через mcp_qwen_check_status(task_id).',
   {
     user_prompt: z.string().describe('Оригинальный, неизмененный запрос пользователя без перефразирования'),
     skills_content: z.string().optional().describe('Полный текст содержимого скиллов (если используются для задачи)'),
     workspace_context: z.string().optional().describe('Текущий контекст рабочей области, структура существующих файлов'),
+    project_dir: z.string().optional().describe('ОБЯЗАТЕЛЕН, если в проекте есть файлы! Абсолютный путь к директории проекта. Сервер автоматически построит дерево структуры, прикрепит 4 файла проекта + 1 txt промпт (со всем недостающим) + до 5 изображений'),
+    target_files: z.array(z.string()).optional().describe('Список файлов для точечной правки (например ["src/index.ts"]). Если указан, прикрепляются ТОЛЬКО эти файлы без отправки всей кодовой базы'),
+    images: z.array(z.string()).optional().describe('Список путей к изображениям, референсам, фото или скриншотам (до 5 изображений: .png, .jpg, .webp и т.д.)'),
+    attached_files: z.array(z.string()).optional().describe('Список абсолютных путей к файлам для прямого прикрепления к сообщению в Qwen Studio (до 10 файлов)'),
     custom_system_prompt: z.string().optional().describe('Дополнительные системные указания для субагента Qwen')
   },
   async (args) => {
@@ -76,6 +87,10 @@ server.tool(
         userPrompt: args.user_prompt,
         skillsContent: args.skills_content,
         workspaceContext: args.workspace_context,
+        projectDir: args.project_dir,
+        targetFiles: args.target_files,
+        images: args.images,
+        attachedFiles: args.attached_files,
         customSystemPrompt: args.custom_system_prompt
       });
 
@@ -88,6 +103,8 @@ server.tool(
                 success: true,
                 task_id: task.id,
                 status: task.status,
+                is_targeted: task.isTargeted || false,
+                attached_files_count: task.filesToAttach ? task.filesToAttach.length : 0,
                 message:
                   `Задача успешно отправлена субагенту Qwen (Task ID: ${task.id}).\n` +
                   `ИНСТРУКЦИЯ ДЛЯ ОРКЕСТРАТОРА (GEMINI):\n` +
@@ -353,6 +370,65 @@ server.tool(
           {
             type: 'text',
             text: `Ошибка сохранения файлов: ${err?.message || String(err)}`
+          }
+        ]
+      };
+    }
+  }
+);
+
+/**
+ * Tool: mcp_qwen_build_project_context
+ */
+server.tool(
+  'mcp_qwen_build_project_context',
+  'Сканирует директорию проекта, формирует дерево каталогов и список файлов: отбирает до 4 файлов кода и до 5 изображений для прямого прикрепления во вложения, а остальные файлы подготавливает для включения в тело запроса. Позволяет Orchestrator предварительно оценить контекст.',
+  {
+    project_dir: z.string().describe('Абсолютный путь к директории проекта'),
+    target_files: z.array(z.string()).optional().describe('Файлы для точечной правки (если правка точечная)'),
+    max_attachments: z.number().optional().describe('Максимальное количество прикрепляемых файлов кода (по умолчанию 4)')
+  },
+  async (args) => {
+    try {
+      const result = buildProjectContext({
+        projectDir: args.project_dir,
+        targetFiles: args.target_files,
+        maxDocAttachments: args.max_attachments !== undefined ? args.max_attachments : 4,
+        maxImageAttachments: 5
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                success: true,
+                is_targeted: result.isTargeted,
+                total_files_count: result.totalFilesCount,
+                total_code_files_count: result.totalCodeFilesCount,
+                total_image_files_count: result.totalImageFilesCount,
+                attached_count: result.attachedCount,
+                doc_files_to_attach: result.docFilesToAttach,
+                image_files_to_attach: result.imageFilesToAttach,
+                files_to_attach: result.filesToAttach,
+                embedded_count: result.embeddedCount,
+                directory_tree: result.directoryTree,
+                embedded_preview_length: result.embeddedFilesPrompt.length
+              },
+              null,
+              2
+            )
+          }
+        ]
+      };
+    } catch (err: any) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: `Ошибка построения контекста: ${err?.message || String(err)}`
           }
         ]
       };

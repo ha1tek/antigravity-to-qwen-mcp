@@ -30,6 +30,14 @@ export interface QwenSubagentTask {
   userPrompt: string;
   skillsContent?: string;
   workspaceContext?: string;
+  projectDir?: string;
+  targetFiles?: string[];
+  images?: string[];
+  attachedFiles?: string[];
+  filesToAttach?: string[];
+  docFilesToAttach?: string[];
+  imageFilesToAttach?: string[];
+  isTargeted?: boolean;
   customSystemPrompt?: string;
   status: TaskStatus;
   createdAt: number;

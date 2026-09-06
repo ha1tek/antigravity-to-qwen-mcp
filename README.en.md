@@ -1,7 +1,7 @@
 # 🧠 Antigravity to Qwen MCP (`mcp_qwen`)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/Version-v1.0%20(First%20Working%20Prototype)-blue.svg)](https://github.com/ha1tek/antigravity-to-qwen-mcp)
+[![Version](https://img.shields.io/badge/Version-v1.1%20(Attachments%20%26%20Vision%20Engine)-blue.svg)](https://github.com/ha1tek/antigravity-to-qwen-mcp)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
 [![MCP Protocol](https://img.shields.io/badge/MCP%20Protocol-2024--11--05-purple.svg)](https://modelcontextprotocol.io/)
@@ -11,7 +11,19 @@
 
 > **Autonomous Model Context Protocol (MCP) Server for dual-model software development orchestration: Gemini in Google Antigravity (Orchestrator) + Qwen 3.8 Max (Executive Subagent). Out of the box, it operates locally via the Qwen Studio desktop application (leveraging Chrome DevTools Protocol / CDP), and its open-source codebase can be readily adapted for any other browser-based AI chat or direct API.**
 >
-> **Release: `v1.0` (First Working Prototype)**
+> **Release: `v1.1` (Attachments & Vision Engine: up to 10 files — 4 project files + 1 prompt txt + 5 photos/screenshots)**
+
+---
+
+## 🚀 What's New in v1.1 (Attachments & Vision Engine)
+
+- 📎 **Up to 10 Attachments Support in Qwen Studio:**
+  - **Up to 5 Documents (`type: ["document"]`):** up to 4 project code files attached as documents + 1 `task_prompt.txt` file (packaging full prompt directives, directory tree, and full code of all remaining project files from 5 to N).
+  - **Up to 5 Images (`type: ["vision"]`):** automatic scanning and attachment of UI references, mockups, screenshots (`references_photos/`, `screenshots/`, `assets/`, `mockups/`) or explicit passing via `images: ["path/to/mockup.png"]`.
+- ⚡ **131,072 Characters Limit Completely Solved:** no textarea overflow errors — large prompts and remaining code are encapsulated into `task_prompt.txt`. With its 1,000,000+ token context window, Qwen 3.8 Max reads the entire codebase in a single request.
+- 🎨 **Dual-Channel React Fiber Uploader:** native emulation of document and image uploads without browser page reload.
+- 🎯 **Targeted Edits with Images:** support for passing targeted files (`target_files`) alongside UI design images (`images`).
+- 🛠 **New Tool `mcp_qwen_build_project_context`:** inspect directory trees and pre-allocate attachments before dispatching tasks.
 
 ---
 
@@ -74,7 +86,7 @@ When executing tasks via `mcp_qwen`, Gemini adheres to strict rules built direct
 
 1. **Strictly 100% Orchestrator:** Gemini does not write code directly bypassing the subagent; all implementation is delegated to Qwen.
 2. **Zero Prompt Distortion:** FORBIDDEN to paraphrase, "improve", summarize, or alter the user's prompt. Forward text verbatim.
-3. **Full Context Gathering:** Passes the raw prompt (`user_prompt`), full skill documentation (`skills_content`), and workspace directory structure (`workspace_context`) into `mcp_qwen_submit_task`.
+3. **Project Context & Attachment Quotas:** If the project contains existing files, `project_dir` MUST be provided. The server automatically attaches up to 4 project code files + 1 `task_prompt.txt` file (containing all remaining code 5..N) + up to 5 images/screenshots (total up to 10 files). For isolated changes, pass `target_files` (and optionally `images`).
 4. **60-Second Timers:** Immediately upon submitting a task, Gemini schedules a 60-second timer via the `schedule` tool to poll progress with `mcp_qwen_check_status`.
 5. **Verbatim File Writing (1:1):** Code is written to disk without deleting comments, altering logic, or truncating lines.
 6. **Chunked Generation (Continuation):** For files exceeding 1000 lines, Qwen pauses with `### STATUS: NEED_CONTINUATION`. The orchestrator writes finished files and triggers `mcp_qwen_continue_task`.
@@ -117,11 +129,12 @@ Qwen Studio displays code blocks using Microsoft Monaco Editor (`pre.qwen-markdo
 
 | Tool Name | Description |
 |---|---|
-| `mcp_qwen_submit_task` | Delegates a development task to Qwen subagent in background, returns `task_id`. |
+| `mcp_qwen_submit_task` | Delegates a development task to Qwen subagent in background. Supports `project_dir` (full project tree, up to 10 file attachments: 4 code files + 1 prompt txt + up to 5 photos/screenshots), `images` (mockups, screenshots), `target_files` (targeted edits), and `attached_files`. Returns `task_id`. |
 | `mcp_qwen_check_status` | Polls status (`RUNNING`, `COMPLETED`, `NEED_CONTINUATION`, `ERROR`), returns parsed files, structure, and `raw_response`. |
 | `mcp_qwen_continue_task` | Sends continuation instruction to Qwen to output remaining project files. |
 | `mcp_qwen_verify_task` | **Step 6 Verification:** Sends assembled structure and compiler/linter error logs to Qwen for confirmation. |
 | `mcp_qwen_extract_and_write_files` | Verbatim file writer with path traversal protection. |
+| `mcp_qwen_build_project_context` | Pre-scans project directory, builds tree, selects up to 4 code files and up to 5 images for attachments, and formats remaining code for prompt. |
 | `mcp_qwen_get_config` | Returns active server configuration and diagnostic network probes. |
 | `mcp_qwen_set_config` | Dynamically updates runtime configuration. |
 
@@ -188,7 +201,23 @@ You do **not** need to manually create shortcuts or launch batch scripts. Upon t
 3. **Qwen (Subagent):** Generates tree structure and full code for each file (`app/main.py`, `app/auth.py`, etc.).
 4. **Gemini (Orchestrator):** Polls status, writes files verbatim to disk, verifies syntax, calls `mcp_qwen_verify_task`, and presents the result upon Qwen's approval.
 
-### Scenario 2: Large Codebases (>1000 lines per file)
+### Scenario 2: Modifying an Existing Project (Context + Attachments + Embedded Files)
+When working on an existing codebase that needs new features or refactoring:
+1. Gemini passes `project_dir: "C:\\projects\\my_app"` (and optionally `images: ["C:\\photos\\mockup.png"]`).
+2. The MCP server automatically:
+   - Scans and builds a complete directory tree.
+   - Allocates attachments up to **10 files (up to 5 documents + up to 5 images)**:
+     * **Up to 5 documents**: up to 4 key project code files attached as documents (`type: ["document"]`) + 1 `task_prompt.txt` file (containing full prompt, directory tree, and full code of all remaining files 5..N), avoiding the 131,072 character textarea limit.
+     * **Up to 5 images**: auto-scanned from project image folders (`references_photos/`, `screenshots/`, `assets/`, `mockups/`) or passed via `images` parameter, attached as vision attachments (`type: ["vision"]`).
+3. Qwen 3.8 Max (with 1,000,000+ token context window) processes the entire project codebase, references, and screenshots in a single request with full architectural awareness.
+
+### Scenario 3: Targeted Single-File Edit
+When only a single component or isolated bug fix is needed:
+1. **User:** *"Fix email validation regex in src/auth/validator.ts."*
+2. Gemini passes `target_files: ["src/auth/validator.ts"]`.
+3. The server attaches **ONLY that file** without rescanning or re-sending the whole project, conserving tokens and maximizing focus.
+
+### Scenario 4: Large Codebases (>1000 lines per file)
 1. Qwen outputs full code up to the token boundary and stops with:
    ```markdown
    ### STATUS: NEED_CONTINUATION
@@ -197,7 +226,7 @@ You do **not** need to manually create shortcuts or launch batch scripts. Upon t
 2. Gemini writes completed files to disk and triggers `mcp_qwen_continue_task`.
 3. Cycles repeat automatically until `### STATUS: ALL_FILES_COMPLETED`.
 
-### Scenario 3: Automated Build Error Fixing
+### Scenario 5: Automated Build Error Fixing
 1. If TypeScript compilation fails:
 2. Gemini sends error diagnostics via `mcp_qwen_verify_task`:
    ```json
